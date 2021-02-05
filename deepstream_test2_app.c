@@ -50,6 +50,8 @@
  * based on the fastest source's framerate. */
 #define MUXER_BATCH_TIMEOUT_USEC 40000
 
+#define GST_CAPS_FEATURES_NVMM "memory:NVMM"
+
 gint frame_number = 0;
 
 /* This is the buffer probe function that we have registered on the sink pad
@@ -198,6 +200,47 @@ get_absolute_file_path (gchar *cfg_file_path, gchar *file_path)
   return abs_file_path;
 }
 
+static void
+decodebin_child_added (GstChildProxy * child_proxy, GObject * object,
+    gchar * name, gpointer user_data)
+{
+  g_print ("Decodebin child added: %s\n", name);
+  if (g_strrstr (name, "decodebin") == name) {
+    g_signal_connect (G_OBJECT (object), "child-added",
+        G_CALLBACK (decodebin_child_added), user_data);
+  }
+}
+
+static void
+cb_newpad (GstElement * decodebin, GstPad * decoder_src_pad, gpointer data)
+{
+  g_print ("In cb_newpad\n");
+  GstCaps *caps = gst_pad_get_current_caps (decoder_src_pad);
+  const GstStructure *str = gst_caps_get_structure (caps, 0);
+  const gchar *name = gst_structure_get_name (str);
+  GstElement *source_bin = (GstElement *) data;
+  GstCapsFeatures *features = gst_caps_get_features (caps, 0);
+
+  /* Need to check if the pad created by the decodebin is for video and not
+   * audio. */
+  if (!strncmp (name, "video", 5)) {
+    /* Link the decodebin pad only if decodebin has picked nvidia
+     * decoder plugin nvdec_*. We do this by checking if the pad caps contain
+     * NVMM memory features. */
+    if (gst_caps_features_contains (features, GST_CAPS_FEATURES_NVMM)) {
+      /* Get the source bin ghost pad */
+      GstPad *bin_ghost_pad = gst_element_get_static_pad (source_bin, "src");
+      if (!gst_ghost_pad_set_target (GST_GHOST_PAD (bin_ghost_pad),
+              decoder_src_pad)) {
+        g_printerr ("Failed to link decoder src pad to source bin ghost pad\n");
+      }
+      gst_object_unref (bin_ghost_pad);
+    } else {
+      g_printerr ("Error: Decodebin did not pick nvidia decoder plugin.\n");
+    }
+  }
+}
+
 static gboolean
 set_tracker_properties (GstElement *nvtracker)
 {
@@ -276,6 +319,53 @@ done:
   return ret;
 }
 
+static GstElement *
+create_source_bin (guint index, gchar * uri)
+{
+  GstElement *bin = NULL, *uri_decode_bin = NULL;
+  gchar bin_name[16] = { };
+
+  g_snprintf (bin_name, 15, "source-bin-%02d", index);
+  /* Create a source GstBin to abstract this bin's content from the rest of the
+   * pipeline */
+  bin = gst_bin_new (bin_name);
+
+  /* Source element for reading from the uri.
+   * We will use decodebin and let it figure out the container format of the
+   * stream and the codec and plug the appropriate demux and decode plugins. */
+  uri_decode_bin = gst_element_factory_make ("uridecodebin", "uri-decode-bin");
+
+  if (!bin || !uri_decode_bin) {
+    g_printerr ("One element in source bin could not be created.\n");
+    return NULL;
+  }
+
+  /* We set the input uri to the source element */
+  g_object_set (G_OBJECT (uri_decode_bin), "uri", uri, NULL);
+
+  /* Connect to the "pad-added" signal of the decodebin which generates a
+   * callback once a new pad for raw data has beed created by the decodebin */
+  g_signal_connect (G_OBJECT (uri_decode_bin), "pad-added",
+      G_CALLBACK (cb_newpad), bin);
+  g_signal_connect (G_OBJECT (uri_decode_bin), "child-added",
+      G_CALLBACK (decodebin_child_added), bin);
+
+  gst_bin_add (GST_BIN (bin), uri_decode_bin);
+
+  /* We need to create a ghost pad for the source bin which will act as a proxy
+   * for the video decoder src pad. The ghost pad will not have a target right
+   * now. Once the decode bin creates the video decoder and generates the
+   * cb_newpad callback, we will set the ghost pad target to the video decoder
+   * src pad. */
+  if (!gst_element_add_pad (bin, gst_ghost_pad_new_no_target ("src",
+              GST_PAD_SRC))) {
+    g_printerr ("Failed to add ghost pad in source bin\n");
+    return NULL;
+  }
+
+  return bin;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -283,6 +373,8 @@ main (int argc, char *argv[])
   GstElement *pipeline = NULL, *source = NULL, *h264parser = NULL,
       *decoder = NULL, *streammux = NULL, *sink = NULL, *pgie = NULL, *sgie = NULL, *nvvidconv = NULL,
       *nvosd = NULL, *nvtracker = NULL;
+  guint num_sources = 1;
+  guint i;
   g_print ("With tracker\n");
 #ifdef PLATFORM_TEGRA
   GstElement *transform = NULL;
@@ -293,7 +385,7 @@ main (int argc, char *argv[])
 
   /* Check input arguments */
   if (argc != 2) {
-    g_printerr ("Usage: %s <elementary H264 filename>\n", argv[0]);
+    g_printerr ("Usage: %s <uri1>\n", argv[0]);
     return -1;
   }
 
@@ -306,22 +398,48 @@ main (int argc, char *argv[])
   /* Create Pipeline element that will be a container of other elements */
   pipeline = gst_pipeline_new ("dstest2-pipeline");
 
-  /* Source element for reading from the file */
-  source = gst_element_factory_make ("filesrc", "file-source");
-
-  /* Since the data format in the input file is elementary h264 stream,
-   * we need a h264parser */
-  h264parser = gst_element_factory_make ("h264parse", "h264-parser");
-
-  /* Use nvdec_h264 for hardware accelerated decode on GPU */
-  decoder = gst_element_factory_make ("nvv4l2decoder", "nvv4l2-decoder");
-
   /* Create nvstreammux instance to form batches from one or more sources. */
   streammux = gst_element_factory_make ("nvstreammux", "stream-muxer");
+
+  gst_bin_add (GST_BIN (pipeline), streammux);
 
   if (!pipeline || !streammux) {
     g_printerr ("One element could not be created. Exiting.\n");
     return -1;
+  }
+
+  for (i = 0; i < num_sources; i++) {
+    GstPad *sinkpad, *srcpad;
+    gchar pad_name[16] = { };
+    GstElement *source_bin = create_source_bin (i, argv[i + 1]);
+
+    if (!source_bin) {
+      g_printerr ("Failed to create source bin. Exiting.\n");
+      return -1;
+    }
+
+    gst_bin_add (GST_BIN (pipeline), source_bin);
+
+    g_snprintf (pad_name, 15, "sink_%u", i);
+    sinkpad = gst_element_get_request_pad (streammux, pad_name);
+    if (!sinkpad) {
+      g_printerr ("Streammux request sink pad failed. Exiting.\n");
+      return -1;
+    }
+
+    srcpad = gst_element_get_static_pad (source_bin, "src");
+    if (!srcpad) {
+      g_printerr ("Failed to get src pad of source bin. Exiting.\n");
+      return -1;
+    }
+
+    if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK) {
+      g_printerr ("Failed to link source bin to stream muxer. Exiting.\n");
+      return -1;
+    }
+
+    gst_object_unref (srcpad);
+    gst_object_unref (sinkpad);
   }
 
   /* Use nvinfer to run inferencing on decoder's output,
@@ -346,7 +464,7 @@ main (int argc, char *argv[])
 #endif
   sink = gst_element_factory_make ("nveglglessink", "nvvideo-renderer");
 
-  if (!source || !h264parser || !decoder || !pgie || !sgie ||
+  if (!pgie || !sgie ||
       !nvtracker || !nvvidconv || !nvosd || !sink) {
     g_printerr ("One element could not be created. Exiting.\n");
     return -1;
@@ -358,9 +476,6 @@ main (int argc, char *argv[])
     return -1;
   }
 #endif
-
-  /* Set the input filename to the source element */
-  g_object_set (G_OBJECT (source), "location", argv[1], NULL);
 
   g_object_set (G_OBJECT (streammux), "batch-size", 1, NULL);
 
@@ -389,43 +504,43 @@ main (int argc, char *argv[])
   /* decoder | pgie1 | nvtracker | sgie1 | sgie2 | sgie3 | etc.. */
 #ifdef PLATFORM_TEGRA
   gst_bin_add_many (GST_BIN (pipeline),
-      source, h264parser, decoder, streammux, pgie, sgie, nvtracker,
+      pgie, sgie, nvtracker,
       nvvidconv, nvosd, transform, sink, NULL);
 #else
   gst_bin_add_many (GST_BIN (pipeline),
-      source, h264parser, decoder, streammux, pgie, sgie, nvtracker,
+      pgie, sgie, nvtracker,
       nvvidconv, nvosd, sink, NULL);
 #endif
 
-  GstPad *sinkpad, *srcpad;
-  gchar pad_name_sink[16] = "sink_0";
-  gchar pad_name_src[16] = "src";
+  // GstPad *sinkpad, *srcpad;
+  // gchar pad_name_sink[16] = "sink_0";
+  // gchar pad_name_src[16] = "src";
 
-  sinkpad = gst_element_get_request_pad (streammux, pad_name_sink);
-  if (!sinkpad) {
-    g_printerr ("Streammux request sink pad failed. Exiting.\n");
-    return -1;
-  }
+  // sinkpad = gst_element_get_request_pad (streammux, pad_name_sink);
+  // if (!sinkpad) {
+  //   g_printerr ("Streammux request sink pad failed. Exiting.\n");
+  //   return -1;
+  // }
 
-  srcpad = gst_element_get_static_pad (decoder, pad_name_src);
-  if (!srcpad) {
-    g_printerr ("Decoder request src pad failed. Exiting.\n");
-    return -1;
-  }
+  // srcpad = gst_element_get_static_pad (decoder, pad_name_src);
+  // if (!srcpad) {
+  //   g_printerr ("Decoder request src pad failed. Exiting.\n");
+  //   return -1;
+  // }
 
-  if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK) {
-      g_printerr ("Failed to link decoder to stream muxer. Exiting.\n");
-      return -1;
-  }
+  // if (gst_pad_link (srcpad, sinkpad) != GST_PAD_LINK_OK) {
+  //     g_printerr ("Failed to link decoder to stream muxer. Exiting.\n");
+  //     return -1;
+  // }
 
-  gst_object_unref (sinkpad);
-  gst_object_unref (srcpad);
+  // gst_object_unref (sinkpad);
+  // gst_object_unref (srcpad);
 
   /* Link the elements together */
-  if (!gst_element_link_many (source, h264parser, decoder, NULL)) {
-    g_printerr ("Elements could not be linked: 1. Exiting.\n");
-    return -1;
-  }
+  // if (!gst_element_link_many (source, h264parser, decoder, NULL)) {
+  //   g_printerr ("Elements could not be linked: 1. Exiting.\n");
+  //   return -1;
+  // }
 
 #ifdef PLATFORM_TEGRA
   if (!gst_element_link_many (streammux, pgie, sgie, nvtracker,
