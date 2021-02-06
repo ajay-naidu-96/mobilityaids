@@ -39,6 +39,7 @@
 
 #define PGIE_CLASS_ID_VEHICLE 0
 #define PGIE_CLASS_ID_PERSON 2
+#define SGIE_CLASS_ID_WHEELCHAIR 0
 
 /* The muxer output resolution must be set if the input streams will be of
  * different resolution. The muxer will scale all the input frames to this
@@ -80,7 +81,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
         for (l_obj = frame_meta->obj_meta_list; l_obj != NULL;
                 l_obj = l_obj->next) {
             obj_meta = (NvDsObjectMeta *) (l_obj->data);
-            if (obj_meta->class_id == PGIE_CLASS_ID_VEHICLE) {
+            if (obj_meta->class_id == SGIE_CLASS_ID_WHEELCHAIR) {
                 vehicle_count++;
                 num_rects++;
             }
@@ -94,7 +95,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
         display_meta->num_labels = 1;
         txt_params->display_text = (char*)g_malloc0 (MAX_DISPLAY_LEN);
         offset = snprintf(txt_params->display_text, MAX_DISPLAY_LEN, "Person = %d ", person_count);
-        offset = snprintf(txt_params->display_text + offset , MAX_DISPLAY_LEN, "Vehicle = %d ", vehicle_count);
+        offset = snprintf(txt_params->display_text + offset , MAX_DISPLAY_LEN, "Wheelchair = %d ", vehicle_count);
 
         /* Now set the offsets where the string should appear */
         txt_params->x_offset = 10;
@@ -102,7 +103,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
 
         /* Font , font-color and font-size */
         txt_params->font_params.font_name = (char*)"Serif";
-        txt_params->font_params.font_size = 10;
+        txt_params->font_params.font_size = 20;
         txt_params->font_params.font_color.red = 1.0;
         txt_params->font_params.font_color.green = 1.0;
         txt_params->font_params.font_color.blue = 1.0;
@@ -483,10 +484,15 @@ main (int argc, char *argv[])
       MUXER_OUTPUT_HEIGHT,
       "batched-push-timeout", MUXER_BATCH_TIMEOUT_USEC, NULL);
 
+  gchar *pgie_engine_path = (char*)"/opt/nvidia/deepstream/deepstream-5.0/samples/models/Primary_Detector/resnet10.caffemodel_b1_gpu0_int8.engine";
+  gchar *sgie_engine_path = (char*)"/opt/nvidia/deepstream/deepstream-5.0/samples/models/WheelChairDetector/resnet18_detector.etlt_b1_gpu0_fp16.engine";
+
   /* Set all the necessary properties of the nvinfer element,
    * the necessary ones are : */
   g_object_set (G_OBJECT (pgie), "config-file-path", PGIE_CONFIG_FILE, NULL);
+  g_object_set (G_OBJECT (pgie), "model-engine-file", pgie_engine_path, NULL);
   g_object_set (G_OBJECT (sgie), "config-file-path", SGIE_CONFIG_FILE, NULL);
+  g_object_set (G_OBJECT (sgie), "model-engine-file", sgie_engine_path, NULL);
 
   /* Set necessary properties of the tracker element. */
   if (!set_tracker_properties(nvtracker)) {
