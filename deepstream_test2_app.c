@@ -26,6 +26,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+
+#include <boost/bind.hpp>
+#include <boost/chrono.hpp>
 
 #include "gstnvdsmeta.h"
 
@@ -53,7 +59,144 @@
 
 #define GST_CAPS_FEATURES_NVMM "memory:NVMM"
 
+struct Wheelie{
+  int x, y, w, h;
+  bool mapped;
+  bool processed_status;
+  int tracker_id;
+  int mapped_tracker_id;
+  int attendee_counter;
+  int wheelchair_bbox_count;
+  std::string status;
+  std::chrono::system_clock::time_point timer;
+  std::chrono::system_clock::time_point delete_timer;
+};
+
+struct Attendee{
+  int x, y, w, h;
+  int tracker_id;
+};
+
+Wheelie wl;
+Attendee a;
+
+std::vector<Wheelie> wheelchair_tracker;
+std::vector<Attendee> attendee_tracker;
+
 gint frame_number = 0;
+
+bool
+valueInRange(int value, int min, int max)
+{ return (value >= min) && (value <= max); }
+
+static void
+map_wheelchair_person() {
+  int w_x, w_y, w_w, w_h;
+  int p_x, p_y, p_w, p_h;
+  int mapped_counter = 0;
+  for (auto w_it = wheelchair_tracker.begin(); w_it != wheelchair_tracker.end(); ++w_it) {
+    w_x = (*w_it).x;
+    w_y = (*w_it).y;
+    w_w = (*w_it).w;
+    w_h = (*w_it).h;
+    for (auto p_it = attendee_tracker.begin(); p_it != attendee_tracker.end(); ++p_it) {
+      p_x = (*p_it).x;
+      p_y = (*p_it).y;
+      p_w = (*p_it).w;
+      p_h = (*p_it).h;
+
+      bool xOverlap = valueInRange(w_x, p_x, p_x + p_w) ||
+                      valueInRange(p_x, w_x, w_x + w_w);
+
+      bool yOverlap = valueInRange(w_y, p_y, p_y + p_h) ||
+                      valueInRange(p_y, w_y, w_y + w_h);
+
+      if (xOverlap && yOverlap) {
+        if (abs((p_y + p_h) - (w_y + w_h)) < 100) {
+          mapped_counter++;
+        }
+      }
+    }
+
+    if (mapped_counter == 2) {
+      (*w_it).mapped = true;
+      (*w_it).attendee_counter++;
+    }
+  }
+}
+
+static void
+validate_wheelchair_attended() {
+  for (auto w_it = wheelchair_tracker.begin(); w_it != wheelchair_tracker.end(); ++w_it) {
+    auto diff = std::chrono::duration_cast<std::chrono::milliseconds>
+    (std::chrono::system_clock::now() - (*w_it).timer).count();
+
+    if(diff > 2000) {
+      (*w_it).processed_status = true;
+      if ((*w_it).mapped) {
+        if ((((*w_it).attendee_counter/(*w_it).wheelchair_bbox_count) < 0.45) && ((*w_it).wheelchair_bbox_count > 10)) {
+          (*w_it).status = "Unattended";
+        }
+        else {
+          (*w_it).status = "Attended";
+        }
+      }
+      else {
+        (*w_it).status = "Unattended";
+      }
+      (*w_it).timer = std::chrono::system_clock::now();
+      // (*w_it).attendee_counter -= (*w_it).attendee_counter;
+      // (*w_it).wheelchair_bbox_count -= (*w_it).wheelchair_bbox_count;
+    }
+
+    diff = std::chrono::duration_cast<std::chrono::milliseconds>
+    (std::chrono::system_clock::now() - (*w_it).delete_timer).count();
+
+    if (diff > 20000) {
+      wheelchair_tracker.erase(w_it);
+      --w_it;
+    }
+  }
+}
+
+void
+set_object_color(NvDsFrameMeta* frame_meta) {
+  for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
+      l_obj = l_obj->next) {
+
+      NvDsObjectMeta *obj_meta = (NvDsObjectMeta *) l_obj->data;
+
+      if (obj_meta == NULL) {
+        // Ignore Null object.
+        continue;
+      }
+
+      int class_index = obj_meta->class_id;
+      int cur_obj_id = obj_meta->object_id;
+
+      for (auto iter = wheelchair_tracker.begin(); iter != wheelchair_tracker.end(); ++iter) {
+        if ((*iter).tracker_id == cur_obj_id) {
+          if ((*iter).processed_status) {
+            if ((*iter).status.compare("Unattended") == 0) {
+              #ifndef PLATFORM_TEGRA
+                obj_meta->rect_params.has_bg_color = 1;
+                obj_meta->rect_params.bg_color.red = 1;
+                obj_meta->rect_params.bg_color.green = 0;
+                obj_meta->rect_params.bg_color.blue = 0;
+                obj_meta->rect_params.bg_color.alpha = 0.2;
+              #endif
+              obj_meta->rect_params.border_width = 8;
+              obj_meta->rect_params.border_color.red = 1;
+              obj_meta->rect_params.border_color.green = 0;
+              obj_meta->rect_params.border_color.blue = 0;
+              obj_meta->rect_params.border_color.alpha = 0.2;
+              obj_meta->text_params.font_params.font_size = 14;
+            }
+          }
+        }
+      }
+    }
+}
 
 /* This is the buffer probe function that we have registered on the sink pad
  * of the OSD element. All the infer elements in the pipeline shall attach
@@ -78,20 +221,90 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
       l_frame = l_frame->next) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
         int offset = 0;
+        std::vector<int> wheelchair_ids;
         for (l_obj = frame_meta->obj_meta_list; l_obj != NULL;
                 l_obj = l_obj->next) {
             obj_meta = (NvDsObjectMeta *) (l_obj->data);
+
+            int x, y, wt, ht, cur_obj_id;
+
+            x = obj_meta->rect_params.left;
+            y = obj_meta->rect_params.top;
+            wt = obj_meta->rect_params.width;
+            ht = obj_meta->rect_params.height;
+
+            cur_obj_id = obj_meta->object_id;
+
             if (obj_meta->class_id == SGIE_CLASS_ID_WHEELCHAIR) {
                 vehicle_count++;
-                num_rects++;
+
+                #ifndef PLATFORM_TEGRA
+                  obj_meta->rect_params.has_bg_color = 1;
+                  obj_meta->rect_params.bg_color.red = 0;
+                  obj_meta->rect_params.bg_color.green = 1;
+                  obj_meta->rect_params.bg_color.blue = 0;
+                  obj_meta->rect_params.bg_color.alpha = 0.2;
+                #endif
+                obj_meta->rect_params.border_width = 8;
+                obj_meta->rect_params.border_color.red = 0;
+                obj_meta->rect_params.border_color.green = 1;
+                obj_meta->rect_params.border_color.blue = 0;
+                obj_meta->rect_params.border_color.alpha = 0.2;
+                obj_meta->text_params.font_params.font_size = 14;
+
+                wl.tracker_id = cur_obj_id;
+                wl.x = x;
+                wl.y = y;
+                wl.w = wt;
+                wl.h = ht;
+
+                auto iter = find_if(wheelchair_tracker.begin(), wheelchair_tracker.end(), boost::bind(&Wheelie::tracker_id, _1) == cur_obj_id);
+
+                if (iter != wheelchair_tracker.end()) {
+                  (*iter).x = x;
+                  (*iter).y = y;
+                  (*iter).w = wt;
+                  (*iter).h = ht;
+                  if ((*iter).processed_status) {
+                    wl.wheelchair_bbox_count = 0;
+                    wl.attendee_counter = 0;
+                  }
+                  wl.wheelchair_bbox_count++;
+                  wl.delete_timer = std::chrono::system_clock::now();
+                }
+                else {
+                  wl.mapped = false;
+                  wl.mapped_tracker_id = -1;
+                  wl.wheelchair_bbox_count = 1;
+
+                  wl.timer = std::chrono::system_clock::now();
+                  wl.delete_timer = std::chrono::system_clock::now();
+                  wheelchair_tracker.emplace_back(wl);
+                  wheelchair_ids.emplace_back(cur_obj_id);
+                }
             }
             if (obj_meta->class_id == PGIE_CLASS_ID_PERSON) {
                 person_count++;
-                num_rects++;
+
+                a.tracker_id = cur_obj_id;
+                a.x = x;
+                a.y = y;
+                a.w = wt;
+                a.h = ht;
+                attendee_tracker.emplace_back(a);
             }
         }
+
+        map_wheelchair_person();
+
+        validate_wheelchair_attended();
+
+        attendee_tracker.clear();
+
+        set_object_color(frame_meta);
+
         display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
-        NvOSD_TextParams *txt_params  = &display_meta->text_params[0];
+        NvOSD_TextParams *txt_params  = display_meta->text_params;
         display_meta->num_labels = 1;
         txt_params->display_text = (char*)g_malloc0 (MAX_DISPLAY_LEN);
         offset = snprintf(txt_params->display_text, MAX_DISPLAY_LEN, "Person = %d ", person_count);
@@ -102,26 +315,23 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
         txt_params->y_offset = 12;
 
         /* Font , font-color and font-size */
-        txt_params->font_params.font_name = (char*)"Serif";
-        txt_params->font_params.font_size = 20;
-        txt_params->font_params.font_color.red = 1.0;
-        txt_params->font_params.font_color.green = 1.0;
-        txt_params->font_params.font_color.blue = 1.0;
-        txt_params->font_params.font_color.alpha = 1.0;
+        txt_params[display_meta->num_labels].font_params.font_name = (char*)"Serif";
+        txt_params[display_meta->num_labels].font_params.font_size = 20;
+        txt_params[display_meta->num_labels].font_params.font_color.red = 0.0;
+        txt_params[display_meta->num_labels].font_params.font_color.green = 0.0;
+        txt_params[display_meta->num_labels].font_params.font_color.blue = 0.0;
+        txt_params[display_meta->num_labels].font_params.font_color.alpha = 1.0;
 
         /* Text background color */
-        txt_params->set_bg_clr = 1;
-        txt_params->text_bg_clr.red = 0.0;
-        txt_params->text_bg_clr.green = 0.0;
-        txt_params->text_bg_clr.blue = 0.0;
-        txt_params->text_bg_clr.alpha = 1.0;
+        txt_params[display_meta->num_labels].set_bg_clr = 1;
+        txt_params[display_meta->num_labels].text_bg_clr.red = 1.0;
+        txt_params[display_meta->num_labels].text_bg_clr.green = 1.0;
+        txt_params[display_meta->num_labels].text_bg_clr.blue = 1.0;
+        txt_params[display_meta->num_labels].text_bg_clr.alpha = 1.0;
 
         nvds_add_display_meta_to_frame(frame_meta, display_meta);
     }
 
-    // g_print ("Frame Number = %d Number of objects = %d "
-    //         "Vehicle Count = %d Person Count = %d\n",
-    //         frame_number, num_rects, vehicle_count, person_count);
     frame_number++;
     return GST_PAD_PROBE_OK;
 }
