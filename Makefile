@@ -44,7 +44,7 @@ PKGS:= gstreamer-1.0
 
 OBJS:= $(SRCS:.c=.o)
 
-CFLAGS+= -I../../../includes
+CFLAGS+= -I/opt/nvidia/deepstream/deepstream-5.0/sources/includes
 
 CFLAGS+= `pkg-config --cflags $(PKGS)`
 

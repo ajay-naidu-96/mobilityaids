@@ -44,7 +44,7 @@
 #define MAX_TRACKING_ID_LEN 16
 
 #define PGIE_CLASS_ID_VEHICLE 0
-#define PGIE_CLASS_ID_PERSON 2
+#define PGIE_CLASS_ID_PERSON 0
 #define SGIE_CLASS_ID_WHEELCHAIR 0
 
 /* The muxer output resolution must be set if the input streams will be of
@@ -63,6 +63,7 @@ struct Wheelie{
   int x, y, w, h;
   bool mapped;
   bool processed_status;
+  bool reset_cal;
   int tracker_id;
   int mapped_tracker_id;
   int attendee_counter;
@@ -77,6 +78,8 @@ struct Attendee{
   int tracker_id;
 };
 
+using namespace std;
+
 Wheelie wl;
 Attendee a;
 
@@ -84,6 +87,10 @@ std::vector<Wheelie> wheelchair_tracker;
 std::vector<Attendee> attendee_tracker;
 
 gint frame_number = 0;
+
+
+// Stack Overflow post,
+// https://stackoverflow.com/questions/306316/determine-if-two-rectangles-overlap-each-other
 
 bool
 valueInRange(int value, int min, int max)
@@ -93,12 +100,12 @@ static void
 map_wheelchair_person() {
   int w_x, w_y, w_w, w_h;
   int p_x, p_y, p_w, p_h;
-  int mapped_counter = 0;
   for (auto w_it = wheelchair_tracker.begin(); w_it != wheelchair_tracker.end(); ++w_it) {
     w_x = (*w_it).x;
     w_y = (*w_it).y;
     w_w = (*w_it).w;
     w_h = (*w_it).h;
+    int mapped_counter = 0;
     for (auto p_it = attendee_tracker.begin(); p_it != attendee_tracker.end(); ++p_it) {
       p_x = (*p_it).x;
       p_y = (*p_it).y;
@@ -112,13 +119,12 @@ map_wheelchair_person() {
                       valueInRange(p_y, w_y, w_y + w_h);
 
       if (xOverlap && yOverlap) {
-        if (abs((p_y + p_h) - (w_y + w_h)) < 100) {
+        if (abs((p_y + p_h) - (w_y + w_h)) < 200) {
           mapped_counter++;
         }
       }
     }
-
-    if (mapped_counter == 2) {
+    if (mapped_counter >= 2) {
       (*w_it).mapped = true;
       (*w_it).attendee_counter++;
     }
@@ -133,8 +139,9 @@ validate_wheelchair_attended() {
 
     if(diff > 2000) {
       (*w_it).processed_status = true;
+      (*w_it).reset_cal = true;
       if ((*w_it).mapped) {
-        if ((((*w_it).attendee_counter/(*w_it).wheelchair_bbox_count) < 0.45) && ((*w_it).wheelchair_bbox_count > 10)) {
+        if ((((*w_it).attendee_counter/(*w_it).wheelchair_bbox_count) < 0.69) && ((*w_it).wheelchair_bbox_count > 10)) {
           (*w_it).status = "Unattended";
         }
         else {
@@ -145,8 +152,6 @@ validate_wheelchair_attended() {
         (*w_it).status = "Unattended";
       }
       (*w_it).timer = std::chrono::system_clock::now();
-      // (*w_it).attendee_counter -= (*w_it).attendee_counter;
-      // (*w_it).wheelchair_bbox_count -= (*w_it).wheelchair_bbox_count;
     }
 
     diff = std::chrono::duration_cast<std::chrono::milliseconds>
@@ -235,7 +240,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
 
             cur_obj_id = obj_meta->object_id;
 
-            if (obj_meta->class_id == SGIE_CLASS_ID_WHEELCHAIR) {
+            if ((obj_meta->unique_component_id == 2) && (obj_meta->class_id == SGIE_CLASS_ID_WHEELCHAIR)) {
                 vehicle_count++;
 
                 #ifndef PLATFORM_TEGRA
@@ -265,12 +270,13 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
                   (*iter).y = y;
                   (*iter).w = wt;
                   (*iter).h = ht;
-                  if ((*iter).processed_status) {
-                    wl.wheelchair_bbox_count = 0;
-                    wl.attendee_counter = 0;
+                  if ((*iter).reset_cal) {
+                    (*iter).wheelchair_bbox_count = 0;
+                    (*iter).attendee_counter = 0;
+                    (*iter).reset_cal = false;
                   }
-                  wl.wheelchair_bbox_count++;
-                  wl.delete_timer = std::chrono::system_clock::now();
+                  (*iter).wheelchair_bbox_count++;
+                  (*iter).delete_timer = std::chrono::system_clock::now();
                 }
                 else {
                   wl.mapped = false;
@@ -283,7 +289,7 @@ osd_sink_pad_buffer_probe (GstPad * pad, GstPadProbeInfo * info,
                   wheelchair_ids.emplace_back(cur_obj_id);
                 }
             }
-            if (obj_meta->class_id == PGIE_CLASS_ID_PERSON) {
+            if ((obj_meta->unique_component_id == 1) && obj_meta->class_id == PGIE_CLASS_ID_PERSON) {
                 person_count++;
 
                 a.tracker_id = cur_obj_id;
@@ -694,8 +700,8 @@ main (int argc, char *argv[])
       MUXER_OUTPUT_HEIGHT,
       "batched-push-timeout", MUXER_BATCH_TIMEOUT_USEC, NULL);
 
-  gchar *pgie_engine_path = (char*)"/opt/nvidia/deepstream/deepstream-5.0/samples/models/Primary_Detector/resnet10.caffemodel_b1_gpu0_int8.engine";
-  gchar *sgie_engine_path = (char*)"/opt/nvidia/deepstream/deepstream-5.0/samples/models/WheelChairDetector/resnet18_detector.etlt_b1_gpu0_fp16.engine";
+  gchar *pgie_engine_path = (char*)"./models/peoplenet/resnet10.caffemodel_b1_gpu0_fp16.engine";
+  gchar *sgie_engine_path = (char*)"./models/wheelchairnet/resnet18_detector.etlt_b1_gpu0_fp16.engine";
 
   /* Set all the necessary properties of the nvinfer element,
    * the necessary ones are : */
