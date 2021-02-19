@@ -1,0 +1,2 @@
+models/wheelchairnet/resnet18_detector.etlt filter=lfs diff=lfs merge=lfs -text
+models/peoplenet/resnet18_peoplenet_pruned.etlt filter=lfs diff=lfs merge=lfs -text
