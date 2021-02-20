@@ -93,6 +93,7 @@ Model load key: tlt_encode
 
 ![Sample1](media/sample1.png)
 ![Sample2](media/sample2.png)
+![Outputgif](media/ezgif.com-video-to-gif.gif)
 
 ##
 
