@@ -118,12 +118,19 @@ map_wheelchair_person() {
       bool yOverlap = valueInRange(w_y, p_y, p_y + p_h) ||
                       valueInRange(p_y, w_y, w_y + w_h);
 
+
+      // This block maps wheelchair bbox with person bbox and checks for proximity (i.e 200 px)
+      // if any person is within the range a counter is incremented.
+
       if (xOverlap && yOverlap) {
         if (abs((p_y + p_h) - (w_y + w_h)) < 200) {
           mapped_counter++;
         }
       }
     }
+
+    // Here mapped counter is checked for >= 2 due to a bbox from person sitting in wheelchair
+    // along with any other person close to the wheelchair bbox
     if (mapped_counter >= 2) {
       (*w_it).mapped = true;
       (*w_it).attendee_counter++;
@@ -138,6 +145,7 @@ validate_wheelchair_attended() {
     (std::chrono::system_clock::now() - (*w_it).timer).count();
 
     if(diff > 2000) {
+      // calculations are aggregated every 2 seconds and results are computed and a color change is notified as a visual queue
       (*w_it).processed_status = true;
       (*w_it).reset_cal = true;
       if ((*w_it).mapped) {
@@ -700,7 +708,7 @@ main (int argc, char *argv[])
       MUXER_OUTPUT_HEIGHT,
       "batched-push-timeout", MUXER_BATCH_TIMEOUT_USEC, NULL);
 
-  gchar *pgie_engine_path = (char*)"./models/peoplenet/resnet10.caffemodel_b1_gpu0_fp16.engine";
+  gchar *pgie_engine_path = (char*)"./models/peoplenet/resnet18_detector.etlt_b1_gpu0_fp16.engine";
   gchar *sgie_engine_path = (char*)"./models/wheelchairnet/resnet18_detector.etlt_b1_gpu0_fp16.engine";
 
   /* Set all the necessary properties of the nvinfer element,
