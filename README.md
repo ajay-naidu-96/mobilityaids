@@ -4,6 +4,9 @@ An AI model to identify people who might need mobility assistance.
 People who solely depend on mobility aids for their commute could possibly end up
 in scenarious where their aid might fail and leave them in uncertain situations. This app could be helpful in addressing such situations.
 
+The app is powered by Intelligent Video Analytics pipeline, Deepstream and Jetson Xavier NX Module
+![Sample3](media/xavier.jpg)
+
 ## Prequisites
 
 ### 1. Setting Up Deepstream
