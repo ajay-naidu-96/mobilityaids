@@ -95,8 +95,8 @@ Model load key: tlt_encode
 
 ## App Output
 
-![Sample1](media/sample1.png)
-![Sample2](media/sample2.png)
+![Sample1](media/sam1.png)
+![Sample2](media/sam2.png)
 ![Outputgif](media/ezgif.com-video-to-gif.gif)
 
 ##
