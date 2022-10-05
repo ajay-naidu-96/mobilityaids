@@ -1,3 +1,6 @@
+# Motivation
+A project had to be built using Nvidia's Deepstream SDK for the Jetson AI Specialist Certification
+
 # MobilityAids APP DeepStream
 An AI model to identify people who might need mobility assistance.
 
